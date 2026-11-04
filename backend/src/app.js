@@ -1,27 +1,76 @@
-// Seed do servidor backend do Document Management System.
-//
-// Este arquivo é apenas um ponto de partida mínimo. Ao longo do workshop você
-// vai usar o Agent Mode do GitHub Copilot para construir as camadas:
-//   - routes/       (definição das rotas)
-//   - controllers/  (entrada HTTP e validação)
-//   - services/     (regras de negócio)
-//   - repositories/ (persistência: arquivos locais + metadados em memória)
-//
-// Restrição do projeto: uploads são gravados no filesystem local da aplicação
-// usando multer com diskStorage. Não utilize provedores externos.
-
 const express = require('express');
+const path = require('node:path');
+const InMemoryDocumentRepository = require('./repositories/inMemoryDocumentRepository');
+const LocalFileRepository = require('./repositories/localFileRepository');
+const createDocumentService = require('./services/documentService');
+const createDocumentController = require('./controllers/documentController');
+const createDocumentRoutes = require('./routes/documentRoutes');
 
-const app = express();
+const DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+
+function createApp(options = {}) {
+  const maxFileSizeBytes = Number(
+    options.maxFileSizeBytes ?? process.env.MAX_FILE_SIZE_BYTES ?? DEFAULT_MAX_FILE_SIZE_BYTES,
+  );
+
+  if (!Number.isSafeInteger(maxFileSizeBytes) || maxFileSizeBytes <= 0) {
+    throw new Error('MAX_FILE_SIZE_BYTES deve ser um inteiro positivo.');
+  }
+
+  const storageDirectory = options.storageDirectory
+    || path.resolve(__dirname, '../storage');
+  const identityMiddleware = options.identityMiddleware || ((req, res, next) => next());
+  const documentRepository = new InMemoryDocumentRepository();
+  const fileRepository = new LocalFileRepository(storageDirectory);
+  const documentService = createDocumentService(documentRepository, fileRepository);
+  const documentController = createDocumentController(documentService);
+  const app = express();
+
+  app.use(express.json());
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
+  });
+
+  app.use(identityMiddleware);
+  app.use(createDocumentRoutes(documentController, fileRepository, maxFileSizeBytes));
+
+  app.use((error, req, res, next) => {
+    if (res.headersSent) {
+      next(error);
+      return;
+    }
+
+    if (error.name === 'DocumentNotFoundError') {
+      res.status(404).json({
+        error: { code: 'DOCUMENT_NOT_FOUND', message: 'Documento não encontrado.' },
+      });
+      return;
+    }
+
+    if (error.name === 'MulterError' && error.code === 'LIMIT_FILE_SIZE') {
+      res.status(413).json({
+        error: { code: 'FILE_TOO_LARGE', message: 'O arquivo excede o tamanho máximo permitido.' },
+      });
+      return;
+    }
+
+    if (error.name === 'MulterError') {
+      res.status(400).json({
+        error: { code: 'INVALID_UPLOAD', message: 'Não foi possível processar o arquivo enviado.' },
+      });
+      return;
+    }
+
+    res.status(500).json({
+      error: { code: 'INTERNAL_ERROR', message: 'Ocorreu um erro interno.' },
+    });
+  });
+
+  return app;
+}
+
+const app = createApp();
 const PORT = process.env.PORT || 3000;
-
-app.use(express.json());
-
-// Endpoint de verificação de saúde. As demais rotas (/upload, /documents,
-// /documents/:id/download) serão implementadas durante o Passo 2.
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
 
 if (require.main === module) {
   app.listen(PORT, () => {
@@ -29,4 +78,5 @@ if (require.main === module) {
   });
 }
 
+app.createApp = createApp;
 module.exports = app;
